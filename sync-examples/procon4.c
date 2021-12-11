@@ -17,7 +17,7 @@ struct data {
   char text[DATA_TEXT_SIZE];
 };
 
-static struct lock_t lock;
+static struct lock_t lock; // a single global lock
 
 bool are_same(struct data* a, struct data* b) {
   for (int i = 0; i < DATA_TEXT_SIZE; i++)
@@ -27,7 +27,7 @@ bool are_same(struct data* a, struct data* b) {
 
 struct data buffer[BUFFER_SIZE] = { 0 };
 
-int produced_until = 0;
+int produced_until = 0; // global, initialized by a single thread
 int consumed_until = 0;
 
 struct data produced[RUNS] = { 0 }; // used to check correctness
@@ -51,7 +51,9 @@ void* produce(void* null) {
       produced[r].text[i] = rand();
     buffer[r % BUFFER_SIZE] = produced[r];
     produced_until++;
-    lock_release(&lock);
+    // TODO: should 1) wake up waiting thread, then 2) release lock instead??
+    // (according to OS textbook)
+    lock_release(&lock); 
     lock_wake_up(&lock); // We tell the consumer it can continue consuming.
     // Correct: This is a better version of the lock one in which we do not busy
     // wait but rely on a notification primitive to let the "idle" cores rest.
