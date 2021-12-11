@@ -123,18 +123,25 @@ tx_t tm_begin(shared_t shared, bool is_ro) {
   // We let read-only transactions run in parallel by acquiring a shared
   // access. On the other hand, read-write transactions acquire an exclusive
   // access. At any point in time, the lock can be shared between any number
-  // of read-only transactions or held by a single read-write transaction.
+  // of read-only transactions OR be held exclusively by a single read-write
+  // transaction.
   if (is_ro) {
     // Note: "unlikely" is a macro that helps branch prediction.
     // It tells the compiler (GCC) that the condition is unlikely to be true
     // and to optimize the code with this additional knowledge.
     // It of course penalizes executions in which the condition turns up to
     // be true.
+    // @zach: since this implementation is using a single shared global lock,
+    // it basically allows no concurrent transactions: i.e. either
+    // one or more read-only transactions are running, or a single
+    // read-write transaction is running
     if (unlikely(
+      // allows multiple (read-only) txns to acquire the lock concurrently
             !shared_lock_acquire_shared(&(((struct region*)shared)->lock))))
       return invalid_tx;
-    return read_only_tx;
+    return read_only_tx; // @zach: need 1 txn handle/id for each ro txn?
   } else {
+    // allows only 1 (read-write) txn to acquire the lock at a time
     if (unlikely(!shared_lock_acquire(&(((struct region*)shared)->lock))))
       return invalid_tx;
     return read_write_tx;
@@ -164,6 +171,7 @@ bool tm_write(shared_t unused(shared), tx_t unused(tx), void const* source,
 }
 
 alloc_t tm_alloc(shared_t shared, tx_t unused(tx), size_t size, void** target) {
+  // @zach: need to validate 'size' is multiple of 'align' ??
   // We allocate the dynamic segment such that its words are correctly
   // aligned. Moreover, the alignment of the 'next' and 'prev' pointers must
   // be satisfied. Thus, we use align on max(align, struct segment_node*).
@@ -172,18 +180,21 @@ alloc_t tm_alloc(shared_t shared, tx_t unused(tx), size_t size, void** target) {
 
   struct segment_node* sn;
   if (unlikely(posix_memalign((void**)&sn, align,
+    // allocate extra space for segment metadata
                               sizeof(struct segment_node) + size) !=
                0))  // Allocation failed
     return nomem_alloc;
 
-  // Insert in the linked list
+  // Insert in the doubly linked list
   sn->prev = NULL;
-  sn->next = ((struct region*)shared)->allocs;
+  sn->next = ((struct region*)shared)->allocs; // @zach: insert at the front?
   if (sn->next) sn->next->prev = sn;
   ((struct region*)shared)->allocs = sn;
-
+  // calculate start address for segment data
   void* segment = (void*)((uintptr_t)sn + sizeof(struct segment_node));
+  // initialize segment data to 0
   memset(segment, 0, size);
+  // point user pointer to start of segment data
   *target = segment;
   return success_alloc;
 }

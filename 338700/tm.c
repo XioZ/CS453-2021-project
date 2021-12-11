@@ -30,49 +30,39 @@
 
 #include "macros.h"
 
-typedef struct segment_t {
-  struct segment_t* prev;
-  struct segment_t* next;
-} segment_t;
-
-typedef struct shared_region_t {  // region data and metadata
-  void* start;
-  segment_t* segments;
-  size_t size;
-  size_t alignment;
-} shared_region_t;
+/*** Helper Functions START ***/
+size_t get_min_alignment(const size_t align) {
+  return align < sizeof(segment_t*) ? sizeof(void*) : align;
+}
+/*** Helper Functions END ***/
 
 /** Create (i.e. allocate + init) a new shared memory region, with one first
- *non-free-able allocated segment (todo: to implement in tm_free())
- of the requested size and alignment.
+ *non-free-able allocated segment of the requested size and alignment.
  * - can be called concurrently (not accessing any shared variable)
- * @param size  Size of the first shared segment of memory to allocate (in
+ * @param size  Size of the first shared memory segment to allocate (in
  *bytes), must be a positive multiple of the alignment
  * @param align Alignment (in bytes, must be a power of 2) that the shared
  * memory region must support
  * @return Opaque shared memory region handle, 'invalid_shared' on failure
  **/
 shared_t tm_create(size_t unused(size), size_t unused(align)) {
-  // TODO: need to validate 'align' is power of 2 and
-  // 'size' is multiple of 'align'??
-  // allocate memory for region struct, which will be used as region handle
+  // allocate memory for region metadata (to be used as region handle)
   shared_region_t* region = (shared_region_t*)malloc(sizeof(shared_region_t));
-  if (region == NULL) {
+  if (unlikely(!region)) {
     return invalid_shared;
   }
-  // allocate memory of requested size and alignment for region data
+  // allocate memory for first segment (un-freeable and unused)
   if (posix_memalign(&(region->start), align, size) != 0) {
-    // if fails, free the handle
     free(region);
     return invalid_shared;
   }
-  // TODO: initialize the locks that guard the shared variables
-  // used by the STM library
+  // TODO: synchronize calls and initialize locks
 
   // initialize first segment to 0
   memset(region->start, 0, size);
   // initialize region metadata
-  region->segments = NULL;  // the library hasn't allocated any segment yet
+  region->segments =
+      NULL;  // no segment explicitly allocated yet (via tm_alloc())
   region->size = size;
   region->alignment = align;
   // return pointer to region struct as handle
@@ -86,13 +76,16 @@ shared_t tm_create(size_t unused(size), size_t unused(align)) {
  * no running/pending transaction (till function returns)
  **/
 void tm_destroy(shared_t unused(shared)) {
+  // TODO: free every word control structure of every segment
+  // TODO: then every segment metadata
+  // TODO: finally free region metadata
   shared_region_t* region = (shared_region_t*)shared;
   // free region metadata: each segment handle
-  while (region->segments != NULL) {
-    segment_t* tail = region->segments->next;
-    free(region->segments);
-    region->segments = tail;
-  }
+  // while (region->segments != NULL) {
+  //   segment_t* tail = region->segments->next;
+  //   free(region->segments);
+  //   region->segments = tail;
+  // }
   // free region data
   free(region->start);
   // free region handle
@@ -136,7 +129,17 @@ size_t tm_align(shared_t unused(shared)) {
  * @return Opaque transaction ID, 'invalid_tx' on failure
  **/
 tx_t tm_begin(shared_t unused(shared), bool unused(is_ro)) {
+  // goal: 1) allow multiple read-only transactions to happen concurrently
+  // (same as reference implementation), and
+  // 2) allow multiple read-write transactions WITHOUT overlapping/conflicting
+  // memory access to happen concurrently (diff/improvement from reference
+  // 3) read-only transactions to happen while there're (concurrent to)
+  // ongoing/pending read-write transactions
+
   // TODO: tm_begin(shared_t)
+
+  // TODO: enter() batcher
+
   return invalid_tx;
 }
 
@@ -147,6 +150,10 @@ tx_t tm_begin(shared_t unused(shared), bool unused(is_ro)) {
  **/
 bool tm_end(shared_t unused(shared), tx_t unused(tx)) {
   // TODO: tm_end(shared_t, tx_t)
+
+  // TODO: commit()
+  // TODO: leave() batcher
+
   return false;
 }
 
@@ -196,7 +203,13 @@ bool tm_write(shared_t unused(shared), tx_t unused(tx),
  **/
 alloc_t tm_alloc(shared_t unused(shared), tx_t unused(tx), size_t unused(size),
                  void** unused(target)) {
-  // TODO: tm_alloc(shared_t, tx_t, size_t, void**)
+  // TODO: synchronize
+
+  // one word (of size 'align') needs to be able to fit a pointer
+  // i.e. can hold a memory address (a min value for 'align')
+  size_t align = ((shared_region_t*)shared)->alignment;
+  align = align < sizeof(struct segment_t*) ? sizeof(void*) : align;
+
   return abort_alloc;
 }
 
