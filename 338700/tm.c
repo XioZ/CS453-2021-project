@@ -73,7 +73,10 @@ shared_t tm_create(size_t unused(size), size_t unused(align)) {
   if (unlikely(!region)) {
     return invalid_shared;
   }
-  region->alignment = align;
+  // adjust alignment so a word can at least fit a pointer (memory address)
+  size_t alignment = align < sizeof(struct segment_t *) ?
+                     sizeof(void *) : align;
+  region->alignment = alignment;
   // allocate memory & initialize control struct for each word
   // in the first unfreeable segment
   const num_words = size / align;
@@ -87,46 +90,45 @@ shared_t tm_create(size_t unused(size), size_t unused(align)) {
     word_controls[i].is_written = 0; // unwritten
     word_controls[i].first_accessor = invalid_tx; // no txn
   }
-  // allocate memory & initialize segment metadata, copy A and B
-  segment_t *segment = malloc(sizeof(segment_t));
-  if (unlikely(!segment)) {
-    free(region);
-    free(word_controls);
-    return invalid_shared;
-  }
-  segment->size = size;
-  segment->word_controls = word_controls;
-  segment->num_words = num_words;
+  // allocate memory for segment metadata + segment data
+  segment_t *first_segment;
+  size_t segment_length = sizeof(segment_t) + size;
   if (unlikely(posix_memalign(
-    (void **) &(segment->copy_a), align, size)) != 0) {
+    (void **) &(first_segment), alignment, segment_length)) != 0) {
     free(region);
     free(word_controls);
-    free(segment);
+    return nomem_alloc;
+  }
+  // initialize segment metadata
+  first_segment->size = size;
+  first_segment->word_controls = word_controls;
+  first_segment->num_words = num_words;
+  // allocate memory for copy A and B
+  if (unlikely(posix_memalign(
+    (void **) &(first_segment->copy_a), align, size)) != 0) {
+    free(region);
+    free(word_controls);
+    free(first_segment);
     return invalid_shared;
   }
   if (unlikely(posix_memalign(
-    (void **) &(segment->copy_b), align, size)) != 0) {
+    (void **) &(first_segment->copy_b), align, size)) != 0) {
     free(region);
     free(word_controls);
-    free(segment);
-    free(segment->copy_a);
+    free(first_segment);
+    free(first_segment->copy_a);
     return invalid_shared;
   }
-  // allocate memory & initialize first segment data
-  if (unlikely(posix_memalign(
-    (void **) &(segment->start), align, size)) != 0) {
-    free(region);
-    free(word_controls);
-    free(segment);
-    free(segment->copy_a);
-    free(segment->copy_b);
-    return invalid_shared;
-  }
-  memset(segment->start, 0, size);
-  // update shared region metadata: insert first segment at the front of the list
-  segment->prev = NULL;
-  segment->next = NULL;
-  region->segment_list = segment;
+  // update region metadata: insert first segment at the front of the list
+  first_segment->prev = NULL;
+  first_segment->next = NULL;
+  region->segment_list = first_segment;
+  // calculate segment data address
+  void *segment_data = (void *) ((uintptr_t) first_segment + sizeof(segment_t));
+  // initialize segment data, copy A and B to 0
+  memset(segment_data, 0, size);
+  memset(first_segment->copy_a, 0, size);
+  memset(first_segment->copy_b, 0, size);
   // return pointer to region struct as handle
   return region;
 }
@@ -162,7 +164,8 @@ void tm_destroy(shared_t unused(shared)) {
  **/
 void *tm_start(shared_t shared) {
   // TODO: synchronize
-  return ((shared_region_t *) shared)->segment_list[0].start;
+  segment_t *segment_list = ((shared_region_t *) shared)->segment_list;
+  return (void *) ((uintptr_t) segment_list + sizeof(segment_t));
 }
 
 /** [thread-safe] Return the size (in bytes) of the first allocated segment of
@@ -172,7 +175,7 @@ void *tm_start(shared_t shared) {
  **/
 size_t tm_size(shared_t shared) {
   // TODO: synchronize
-  return ((shared_region_t *) shared)->segment_list[0].size;
+  return ((shared_region_t *) shared)->segment_list->size;
 }
 
 /** [thread-safe] Return the alignment (in bytes) of the memory accesses on the
@@ -266,10 +269,7 @@ bool tm_write(shared_t unused(shared), tx_t unused(tx),
 alloc_t tm_alloc(shared_t shared, tx_t unused(tx), size_t size,
                  void **target) {
   // TODO: synchronize
-  // min alignment = max(pointer size, user-requested alignment)
-  size_t user_alignment = ((shared_region_t *) shared)->alignment;
-  size_t alignment = user_alignment < sizeof(struct segment_t *) ?
-                     sizeof(void *) : user_alignment;
+  size_t alignment = ((shared_region_t *) shared)->alignment; // adjusted in tm_create() when first segment is allocated
   // allocate memory & initialize control struct for each word in the segment
   size_t num_words = size / alignment;
   word_control_t *word_controls = calloc(num_words, sizeof(word_control_t));
