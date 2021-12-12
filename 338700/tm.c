@@ -53,7 +53,7 @@ typedef struct segment_t {  // segment metadata
 } segment_t;
 
 typedef struct shared_region_t {  // region data and metadata
-    segment_t *segment_list;  // explicitly allocated segments (via tm_alloc())
+    segment_t *segment_list;  // points to the first segment (start of segment metadata)
     size_t alignment;     // alignment for all segments
 } shared_region_t;
 
@@ -139,22 +139,20 @@ shared_t tm_create(size_t unused(size), size_t unused(align)) {
  * @param shared Shared memory region to destroy (hasn't been destroyed), with
  * no running/pending transaction (till function returns)
  **/
-void tm_destroy(shared_t unused(shared)) {
-  // TODO: free every word control structure of every segment
-  // TODO: then every segment metadata
-  // TODO: finally free region metadata
+void tm_destroy(shared_t shared) {
   shared_region_t *region = (shared_region_t *) shared;
-  // free region metadata: each segment handle
-  // while (region->segments != NULL) {
-  //   segment_t* tail = region->segments->next;
-  //   free(region->segments);
-  //   region->segments = tail;
-  // }
-  // free region data
-  free(region->start);
-  // free region handle
+  // free every segment, its control structure and copies
+  while (region->segment_list) {
+    segment_t *tail = region->segment_list->next;
+    free(region->segment_list->word_controls);
+    free(region->segment_list->copy_a);
+    free(region->segment_list->copy_b);
+    free(region->segment_list);
+    region->segment_list = tail;
+  }
+  // free region metadata
   free(region);
-  // TODO: clean up locks used by the library
+  // TODO: clean up locks
 }
 
 /** [thread-safe] Return the start address of the first allocated segment in the
@@ -335,9 +333,23 @@ alloc_t tm_alloc(shared_t shared, tx_t unused(tx), size_t size,
  **/
 bool tm_free(shared_t shared, tx_t unused(tx), void *target) {
   // TODO: synchronize
+  segment_t *segment =
+    (struct segment_t *) ((uintptr_t) target - sizeof(segment_t));
   // update region metadata: remove from segment list
-
+  if (segment->prev) {
+    segment->prev->next = segment->next;
+  } else {
+    ((shared_region_t *) shared)->segment_list = segment->next;
+  }
+  if (segment->next) {
+    segment->next->prev = segment->prev;
+  }
   // TODO: free ONLY when last transaction in this batch leaves
-  //  AND IF this transaction commits
+  //  AND ONLY IF this transaction commits
+  // implementation: 1) add segment pointer to list of segments to free in region
+  //  2) when transaction commits, tag its segments as ok to free
+  //  3) when last transaction leaves batcher, call free() on those pointers
+  //  before incrementing epoch
+//  free(segment);
   return true;
 }
