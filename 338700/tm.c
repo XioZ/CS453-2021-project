@@ -41,13 +41,13 @@ typedef struct word_control_t {  // dual-version's control structure
 } word_control_t;
 
 typedef struct segment_t {  // segment metadata
-    // TODO: prev and next => easier to implement free()
-    void *start;
+//    void *start;
     void *copy_a;
     void *copy_b;
     size_t size;
     word_control_t *word_controls;
     size_t num_words;
+    // doubly linked list (simplify tm_free() when a segment in the middle is removed)
     struct segment_t *prev;
     struct segment_t *next;
 } segment_t;
@@ -98,14 +98,14 @@ shared_t tm_create(size_t unused(size), size_t unused(align)) {
   segment->word_controls = word_controls;
   segment->num_words = num_words;
   if (unlikely(posix_memalign(
-          (void **) &(segment->copy_a), align, size)) != 0) {
+    (void **) &(segment->copy_a), align, size)) != 0) {
     free(region);
     free(word_controls);
     free(segment);
     return invalid_shared;
   }
   if (unlikely(posix_memalign(
-          (void **) &(segment->copy_b), align, size)) != 0) {
+    (void **) &(segment->copy_b), align, size)) != 0) {
     free(region);
     free(word_controls);
     free(segment);
@@ -114,7 +114,7 @@ shared_t tm_create(size_t unused(size), size_t unused(align)) {
   }
   // allocate memory & initialize first segment data
   if (unlikely(posix_memalign(
-          (void **) &(segment->start), align, size)) != 0) {
+    (void **) &(segment->start), align, size)) != 0) {
     free(region);
     free(word_controls);
     free(segment);
@@ -266,12 +266,12 @@ bool tm_write(shared_t unused(shared), tx_t unused(tx),
 alloc_t tm_alloc(shared_t shared, tx_t unused(tx), size_t size,
                  void **target) {
   // TODO: synchronize
-  // fft: need to set max(pointer size, region->alignment) as alignment?
-  // no, not storing segment metadata (segment_t struct) in aligned memory
-  // allocated by posix_memalign()
-  const alignment = ((shared_region_t *) shared)->alignment;
+  // min alignment = max(pointer size, user-requested alignment)
+  size_t user_alignment = ((shared_region_t *) shared)->alignment;
+  size_t alignment = user_alignment < sizeof(struct segment_t *) ?
+                     sizeof(void *) : user_alignment;
   // allocate memory & initialize control struct for each word in the segment
-  const num_words = size / alignment;
+  size_t num_words = size / alignment;
   word_control_t *word_controls = calloc(num_words, sizeof(word_control_t));
   if (unlikely(!word_controls)) {
     return nomem_alloc;
@@ -281,49 +281,49 @@ alloc_t tm_alloc(shared_t shared, tx_t unused(tx), size_t size,
     word_controls[i].is_written = 0; // unwritten
     word_controls[i].first_accessor = invalid_tx; // no txn
   }
-  // allocate memory & initialize segment metadata, copy A and B
-  segment_t *segment = malloc(sizeof(segment_t));
-  if (unlikely(!segment)) {
-    free(word_controls);
-    return nomem_alloc;
-  }
-  segment->size = size;
-  segment->word_controls = word_controls;
-  segment->num_words = num_words;
+  // allocate memory for segment metadata + segment data
+  segment_t *new_segment;
+  size_t segment_length = sizeof(segment_t) + size;
   if (unlikely(posix_memalign(
-          (void **) &(segment->copy_a), alignment, size)) != 0) {
+    (void **) &(new_segment), alignment, segment_length)) != 0) {
     free(word_controls);
-    free(segment);
+    return nomem_alloc;
+  }
+  // initialize segment metadata
+  new_segment->size = size;
+  new_segment->word_controls = word_controls;
+  new_segment->num_words = num_words;
+  // allocate memory for copy A and B
+  if (unlikely(posix_memalign(
+    (void **) &(new_segment->copy_a), alignment, size)) != 0) {
+    free(word_controls);
+    free(new_segment);
     return nomem_alloc;
   }
   if (unlikely(posix_memalign(
-          (void **) &(segment->copy_b), alignment, size)) != 0) {
+    (void **) &(new_segment->copy_b), alignment, size)) != 0) {
     free(word_controls);
-    free(segment);
-    free(segment->copy_a);
+    free(new_segment);
+    free(new_segment->copy_a);
     return nomem_alloc;
   }
-  // allocate memory & initialize segment data
-  if (unlikely(posix_memalign(
-          (void **) &(segment->start), alignment, size)) != 0) {
-    free(word_controls);
-    free(segment);
-    free(segment->copy_a);
-    free(segment->copy_b);
-    return nomem_alloc;
-  }
-  memset(segment->start, 0, size);
-  // update shared region metadata: insert new segment at the front of the list
+  // update region metadata: insert new segment at the front of the list
   shared_region_t *region = (shared_region_t *) shared;
-  segment->prev = NULL;
-  segment->next = region->segment_list;
-  if (segment->next) {
-    segment->next->prev = segment;
+  new_segment->prev = NULL;
+  new_segment->next = region->segment_list;
+  if (new_segment->next) {
+    new_segment->next->prev = new_segment;
   }
-  region->segment_list = segment;
+  region->segment_list = new_segment;
+  // calculate segment data address
+  void *segment_data = (void *) ((uintptr_t) new_segment + sizeof(segment_t));
+  // initialize segment data, copy A and B to 0
+  memset(segment_data, 0, size);
+  memset(new_segment->copy_a, 0, size);
+  memset(new_segment->copy_b, 0, size);
   // point user pointer to start of segment data
-  *target = segment->start;
-  return abort_alloc;
+  *target = segment_data;
+  return success_alloc;
 }
 
 /** [thread-safe] Memory freeing in the given transaction.
@@ -333,7 +333,11 @@ alloc_t tm_alloc(shared_t shared, tx_t unused(tx), size_t size,
  *to deallocate
  * @return Whether the whole transaction can continue
  **/
-bool tm_free(shared_t unused(shared), tx_t unused(tx), void *unused(target)) {
-  // TODO: tm_free(shared_t, tx_t, void*)
-  return false;
+bool tm_free(shared_t shared, tx_t unused(tx), void *target) {
+  // TODO: synchronize
+  // update region metadata: remove from segment list
+
+  // TODO: free ONLY when last transaction in this batch leaves
+  //  AND IF this transaction commits
+  return true;
 }

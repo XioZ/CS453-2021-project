@@ -203,7 +203,6 @@ alloc_t tm_alloc(shared_t shared, tx_t unused(tx), size_t size, void **target) {
 bool tm_free(shared_t shared, tx_t unused(tx), void *segment) {
   struct segment_node *sn =
           (struct segment_node *) ((uintptr_t) segment - sizeof(struct segment_node));
-
   // Remove from the linked list
   if (sn->prev)
     sn->prev->next = sn->next;
