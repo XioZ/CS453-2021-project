@@ -17,11 +17,11 @@ SRCS_CXX := $(foreach SOURCE_DIR,$(SOURCE_DIRS),$(call WILD_EXT,EXT_CXX,$(SOURCE
 OBJS     := $(SRCS_C:%=%.o) $(SRCS_CXX:%=%.o)
 
 CC       := $(CC)
-CCFLAGS  := -Wall -Wextra -Wfatal-errors -O2 -std=c11 $(foreach INCLUDE_DIR,$(INCLUDE_DIRS),-I$(INCLUDE_DIR))
+CCFLAGS  := -Wall -Wextra -Wfatal-errors -O2 -std=c11 -fsanitize=address $(foreach INCLUDE_DIR,$(INCLUDE_DIRS),-I$(INCLUDE_DIR))
 CXX      := $(CXX)
-CXXFLAGS := -Wall -Wextra -Wfatal-errors -O2 -std=c++17 $(foreach INCLUDE_DIR,$(INCLUDE_DIRS),-I$(INCLUDE_DIR))
+CXXFLAGS := -Wall -Wextra -Wfatal-errors -O2 -std=c++17 -fsanitize=address $(foreach INCLUDE_DIR,$(INCLUDE_DIRS),-I$(INCLUDE_DIR))
 LD       := $(if $(SRCS_CXX),$(CXX),$(CC))
-LDFLAGS  :=
+LDFLAGS  := -fsanitize=address
 LDLIBS   := -ldl -lpthread
 
 LIB_DIRS := $(filter-out ../include/ ../grading/ ../playground/ ../template/ ../sync-examples/,$(filter-out $(wildcard ../*),$(wildcard ../*/)))
